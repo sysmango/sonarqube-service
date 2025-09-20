@@ -1,0 +1,80 @@
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: sonarqube-conf-pvc
+  namespace: {{ sonarqube_namespace }}
+  labels:
+    app: sonarqube
+    volume: conf
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: {{ sonarqube_conf_pvc_size }}
+  selector:
+    matchLabels:
+      app: sonarqube
+      volume: conf
+      env: "{{ env }}"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: sonarqube-data-pvc
+  namespace: {{ sonarqube_namespace }}
+  labels:
+    app: sonarqube
+    volume: data
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: {{ sonarqube_data_pvc_size }}
+  selector:
+    matchLabels:
+      app: sonarqube
+      volume: data
+      env: "{{ env }}"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: sonarqube-logs-pvc
+  namespace: {{ sonarqube_namespace }}
+  labels:
+    app: sonarqube
+    volume: logs
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: {{ sonarqube_logs_pvc_size }}
+  selector:
+    matchLabels:
+      app: sonarqube
+      volume: logs
+      env: "{{ env }}"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: sonarqube-extensions-pvc
+  namespace: {{ sonarqube_namespace }}
+  labels:
+    app: sonarqube
+    volume: extensions
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: {{ sonarqube_extensions_pvc_size }}
+  selector:
+    matchLabels:
+      app: sonarqube
+      volume: extensions
+      env: "{{ env }}"

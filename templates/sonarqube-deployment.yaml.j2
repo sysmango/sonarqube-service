@@ -1,0 +1,160 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sonarqube
+  namespace: {{ sonarqube_namespace }}
+  labels:
+    app: sonarqube
+spec:
+  replicas: {{ sonarqube_replicas | default(1) }}
+  strategy:
+    type: Recreate
+    rollingUpdate: null
+  selector:
+    matchLabels:
+      app: sonarqube
+  template:
+    metadata:
+      labels:
+        app: sonarqube
+    spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: {{ sonar_nfs_dir_group | default(999) | int }}
+        fsGroupChangePolicy: OnRootMismatch
+{% if enable_ca_certificates | default(true) %}
+      initContainers:
+        - name: ca-certificates-setup
+          image: registry.sysmango.net/debian:bullseye-slim
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -e
+              echo "Setting up CA certificates..."
+              
+              # Install ca-certificates package and create directory
+              apt-get update && apt-get install -y ca-certificates
+              mkdir -p /usr/local/share/ca-certificates/
+              
+              # Copy CA certificates to the system location (if any provided)
+              if ls /tmp/ca-certs/*.crt >/dev/null 2>&1; then
+                cp /tmp/ca-certs/*.crt /usr/local/share/ca-certificates/
+              else
+                echo "No additional CA certs found in ConfigMap; continuing with system CAs."
+              fi
+              
+              # Update the CA certificate store
+              update-ca-certificates
+              
+              # Copy the updated CA bundle to shared volume
+              cp /etc/ssl/certs/ca-certificates.crt /shared-ca-certs/
+              echo "CA certificates setup complete"
+          volumeMounts:
+            - name: ca-certificates-volume
+              mountPath: /tmp/ca-certs
+              readOnly: true
+            - name: shared-ca-certs
+              mountPath: /shared-ca-certs
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+{% endif %}
+      containers:
+        - name: sonarqube
+          image: {{ sonarqube_docker_image }}:{{ sonarqube_docker_image_tag }}
+          ports:
+            - containerPort: 9000
+              name: http
+              protocol: TCP
+          env:
+            # Database configuration
+            - name: SONAR_JDBC_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: sonarqube-config
+                  key: SONAR_JDBC_URL
+            - name: SONAR_JDBC_USERNAME
+              valueFrom:
+                configMapKeyRef:
+                  name: sonarqube-config
+                  key: SONAR_JDBC_USERNAME
+            - name: SONAR_JDBC_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: sonarqube-secret
+                  key: SONAR_JDBC_PASSWORD
+{% if enable_ldap | default(true) %}
+            # LDAP configuration
+            - name: SONAR_SECURITY_REALM
+              value: "LDAP"
+            - name: LDAP_URL
+              value: "{{ ldap_url | default('') }}"
+            - name: LDAP_BINDDN
+              value: "{{ ldap_bind_dn | default('') }}"
+            - name: LDAP_BINDPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: sonarqube-secret
+                  key: LDAP_BIND_PASSWORD
+            - name: LDAP_USER_BASEDN
+              value: "{{ ldap_base_dn | default('') }}"
+{% endif %}
+{% if enable_ca_certificates | default(true) %}
+            # CA certificates configuration
+            - name: JAVA_OPTS
+              value: "-Djavax.net.ssl.trustStore=/shared-ca-certs/cacerts -Djavax.net.ssl.trustStorePassword=changeit"
+{% endif %}
+          resources:
+{{ sonarqube_resources | to_nice_yaml | indent(12, true) }}
+          volumeMounts:
+            - name: sonarqube-conf
+              mountPath: /opt/sonarqube/conf
+            - name: sonarqube-data
+              mountPath: /opt/sonarqube/data
+            - name: sonarqube-logs
+              mountPath: /opt/sonarqube/logs
+            - name: sonarqube-extensions
+              mountPath: /opt/sonarqube/extensions
+{% if enable_ca_certificates | default(true) %}
+            - name: shared-ca-certs
+              mountPath: /shared-ca-certs
+              readOnly: true
+{% endif %}
+          livenessProbe:
+            httpGet:
+              path: /api/system/status
+              port: 9000
+            initialDelaySeconds: 120
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 6
+          readinessProbe:
+            httpGet:
+              path: /api/system/status
+              port: 9000
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+      volumes:
+        - name: sonarqube-conf
+          persistentVolumeClaim:
+            claimName: sonarqube-conf-pvc
+        - name: sonarqube-data
+          persistentVolumeClaim:
+            claimName: sonarqube-data-pvc
+        - name: sonarqube-logs
+          persistentVolumeClaim:
+            claimName: sonarqube-logs-pvc
+        - name: sonarqube-extensions
+          persistentVolumeClaim:
+            claimName: sonarqube-extensions-pvc
+{% if enable_ca_certificates | default(true) %}
+        - name: ca-certificates-volume
+          configMap:
+            name: {{ ca_configmap_name }}
+        - name: shared-ca-certs
+          emptyDir: {}
+{% endif %}

@@ -1,2 +1,428 @@
 ---
-# tasks file for sonarqube-service
+# SonarQube Service role: SonarQube deployment on K3s with NFS-backed storage and Traefik ingress
+
+# Preflight: required CRDs and CA certificates
+- name: Preflight | Check CA ConfigMap exists (if CA certificates enabled)
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: ConfigMap
+    name: "{{ ca_configmap_name }}"
+    namespace: "{{ ca_configmap_namespace }}"
+  register: ca_configmap_check
+  when: enable_ca_certificates | default(true)
+
+- name: Preflight | Assert CA ConfigMap exists (if CA certificates enabled)
+  ansible.builtin.assert:
+    that:
+      - (ca_configmap_check.resources | length) > 0
+    fail_msg: "CA ConfigMap {{ ca_configmap_name }} not found in {{ ca_configmap_namespace }}. Ensure ca-certificates role has been run."
+    success_msg: "CA ConfigMap found."
+  when: enable_ca_certificates | default(true)
+
+- name: Preflight | Check Traefik IngressRoute CRD present
+  kubernetes.core.k8s_info:
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: ingressroutes.traefik.io
+  register: traefik_ir_crd
+
+- name: Preflight | Assert required CRDs exist
+  ansible.builtin.assert:
+    that:
+      - (traefik_ir_crd.resources | length) > 0
+    fail_msg: "Required CRDs missing. Ensure Traefik v3 is installed (ingressroutes.traefik.io)."
+    success_msg: "All required CRDs are present."
+
+# Vault: fetch postgres password
+- name: Vault | Read Postgres secret (KV v2)
+  hashivault_read:
+    url: "{{ vault_addr }}"
+    namespace: "{{ vault_namespace | default('') }}"
+    mount_point: "kv"
+    secret: "{{ pg_vault_secret }}"
+    version: 2
+    verify: false
+  register: vault_pg
+  environment:
+    VAULT_ADDR: "{{ vault_addr }}"
+    VAULT_NAMESPACE: "{{ vault_namespace | default('') }}"
+  when: pg_password_from_vault | default(true)
+
+- name: Vault | Set facts from postgres secret
+  ansible.builtin.set_fact:
+    pg_secret_map: "{{ vault_pg.value | default(vault_pg.data) }}"
+    postgres_password: "{{ (vault_pg.value[pg_vault_field] | default(vault_pg.data[pg_vault_field])) | default(postgres_password | default('')) }}"
+  when: pg_password_from_vault | default(true)
+
+- name: Vault | Validate postgres values present (if enabled)
+  ansible.builtin.assert:
+    that:
+      - (postgres_password | default('')) | length > 0
+    fail_msg: "Vault DB values missing. Ensure secret {{ pg_vault_secret }} has key: {{ pg_vault_field }}."
+    success_msg: "Vault DB values loaded."
+  when: pg_password_from_vault | default(true)
+
+# Vault: fetch sonarqube secrets
+- name: Vault | Read SonarQube secret (KV v2)
+  hashivault_read:
+    url: "{{ vault_addr }}"
+    namespace: "{{ vault_namespace | default('') }}"
+    mount_point: "kv"
+    secret: "{{ sonarqube_vault_secret }}"
+    version: 2
+    verify: false
+  register: vault_sonarqube
+  environment:
+    VAULT_ADDR: "{{ vault_addr }}"
+    VAULT_NAMESPACE: "{{ vault_namespace | default('') }}"
+  when: sonarqube_password_from_vault | default(true)
+
+- name: Vault | Set facts from sonarqube secret
+  ansible.builtin.set_fact:
+    sonarqube_secret_map: "{{ vault_sonarqube.value | default(vault_sonarqube.data) }}"
+    sonarqube_db_user: "{{ (vault_sonarqube.value['sonar_db_user'] | default(vault_sonarqube.data['sonar_db_user'])) | default(sonarqube_db_user | default('sonarqube')) }}"
+    sonarqube_db_password: "{{ (vault_sonarqube.value['sonar_db_password'] | default(vault_sonarqube.data['sonar_db_password'])) | default(sonarqube_db_password | default('')) }}"
+    sonarqube_database: "{{ (vault_sonarqube.value['sonar_database'] | default(vault_sonarqube.data['sonar_database'])) | default(sonarqube_database | default('sonarqube')) }}"
+  when: sonarqube_password_from_vault | default(true)
+
+# Vault: fetch LDAP secrets (if enabled)
+- name: Vault | Read LDAP secret (KV v2)
+  hashivault_read:
+    url: "{{ vault_addr }}"
+    namespace: "{{ vault_namespace | default('') }}"
+    mount_point: "kv"
+    secret: "{{ ldap_vault_secret }}"
+    version: 2
+    verify: false
+  register: vault_ldap
+  environment:
+    VAULT_ADDR: "{{ vault_addr }}"
+    VAULT_NAMESPACE: "{{ vault_namespace | default('') }}"
+  when: enable_ldap | default(true)
+
+- name: Vault | Set facts from LDAP secret
+  ansible.builtin.set_fact:
+    ldap_secret_map: "{{ vault_ldap.value | default(vault_ldap.data) }}"
+    ldap_url: "{{ (vault_ldap.value['ldap_url'] | default(vault_ldap.data['ldap_url'])) | default(ldap_url | default('')) }}"
+    ldap_bind_dn: "{{ (vault_ldap.value['ldap_bind_dn'] | default(vault_ldap.data['ldap_bind_dn'])) | default(ldap_bind_dn | default('')) }}"
+    ldap_bind_password: "{{ (vault_ldap.value['ldap_bind_pwd'] | default(vault_ldap.data['ldap_bind_pwd'])) | default(ldap_bind_password | default('')) }}"
+    ldap_base_dn: "{{ (vault_ldap.value['ldap_base_dn'] | default(vault_ldap.data['ldap_base_dn'])) | default(ldap_base_dn | default('')) }}"
+  when: enable_ldap | default(true)
+
+- name: Vault | Validate sonarqube values present (if enabled)
+  ansible.builtin.assert:
+    that:
+      - (sonarqube_db_user | default('')) | length > 0
+      - (sonarqube_db_password | default('')) | length > 0
+      - (sonarqube_database | default('')) | length > 0
+    fail_msg: "Vault SonarQube values missing. Ensure secret {{ sonarqube_vault_secret }} has keys: sonar_db_user, sonar_db_password, sonar_database."
+    success_msg: "Vault SonarQube values loaded."
+  when: sonarqube_password_from_vault | default(true)
+
+# NFS preflight
+- name: Preflight | Assert sonar_nfs_server_host is provided
+  ansible.builtin.assert:
+    that:
+      - (sonar_nfs_server_host | default('')) | length > 0
+    fail_msg: "sonar_nfs_server_host is not set. Provide the inventory host or IP of the NFS server."
+    success_msg: "sonar_nfs_server_host provided."
+
+- name: NFS | Verify connectivity to NFS server
+  ansible.builtin.ping:
+  delegate_to: "{{ sonar_nfs_server_host }}"
+
+- name: NFS | Create SonarQube export directories on NFS server
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "{{ sonar_nfs_dir_mode }}"
+    owner: "{{ sonar_nfs_dir_owner }}"
+    group: "{{ sonar_nfs_dir_group }}"
+  delegate_to: "{{ sonar_nfs_server_host }}"
+  become: true
+  loop:
+    - "{{ sonar_nfs_conf_path }}"
+    - "{{ sonar_nfs_data_path }}"
+    - "{{ sonar_nfs_logs_path }}"
+    - "{{ sonar_nfs_extensions_path }}"
+
+- name: NFS | Fix ownership on existing SonarQube files
+  ansible.builtin.command: >
+    chown -R {{ sonar_nfs_dir_owner }}:{{ sonar_nfs_dir_group }} {{ item }}
+  delegate_to: "{{ sonar_nfs_server_host }}"
+  become: true
+  loop:
+    - "{{ sonar_nfs_conf_path }}"
+    - "{{ sonar_nfs_data_path }}"
+    - "{{ sonar_nfs_logs_path }}"
+    - "{{ sonar_nfs_extensions_path }}"
+  changed_when: true
+
+- name: NFS | Fix directory permissions for SonarQube
+  ansible.builtin.command: >
+    find {{ item }} -type d -exec chmod 755 {} \;
+  delegate_to: "{{ sonar_nfs_server_host }}"
+  become: true
+  loop:
+    - "{{ sonar_nfs_conf_path }}"
+    - "{{ sonar_nfs_data_path }}"
+    - "{{ sonar_nfs_logs_path }}"
+    - "{{ sonar_nfs_extensions_path }}"
+  changed_when: true
+
+# Database setup (if enabled)
+- name: Database | Create sonarqube db user
+  postgresql_user:
+    login_host: "{{ postgres_external_host }}"
+    login_password: "{{ postgres_password }}"
+    login_user: "{{ postgres_user | default('postgres') }}"
+    user: "{{ sonarqube_db_user }}"
+    password: "{{ sonarqube_db_password }}"
+    encrypted: "yes"
+    state: present
+  when: create_sonarqube_db | default(true)
+  delegate_to: localhost
+
+- name: Database | Setup sonarqube database on db server
+  postgresql_db:
+    login_host: "{{ postgres_external_host }}"
+    login_password: "{{ postgres_password }}"
+    login_user: "{{ postgres_user | default('postgres') }}"
+    name: "{{ sonarqube_database }}"
+    owner: "{{ sonarqube_db_user }}"
+    state: present
+  when: create_sonarqube_db | default(true)
+  delegate_to: localhost
+
+# Namespace
+- name: Create sonarqube namespace
+  kubernetes.core.k8s:
+    name: "{{ sonarqube_namespace }}"
+    api_version: v1
+    kind: Namespace
+    state: present
+
+# TLS via cert-manager (optional)
+- name: Preflight | Check cert-manager Certificate CRD present (if cert-manager enabled)
+  kubernetes.core.k8s_info:
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: certificates.cert-manager.io
+  register: certmgr_crd
+  when: enable_cert_manager | default(false)
+
+- name: Preflight | Assert cert-manager CRD exists (if cert-manager enabled)
+  ansible.builtin.assert:
+    that:
+      - (certmgr_crd.resources | length) > 0
+    fail_msg: "cert-manager CRD certificates.cert-manager.io not found. Install cert-manager or disable enable_cert_manager."
+    success_msg: "cert-manager CRD found."
+  when: enable_cert_manager | default(false)
+
+# Replicate CA ConfigMap into app namespace (if enabled)
+- name: CA | Get sysmango-ca-certificates from kube-system
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: ConfigMap
+    name: "{{ ca_configmap_name }}"
+    namespace: "{{ ca_configmap_namespace }}"
+  register: ca_src_cm
+  when: enable_ca_certificates | default(true)
+
+- name: CA | Compute number of .crt keys in source ConfigMap
+  ansible.builtin.set_fact:
+    ca_src_crt_count: "{{ (ca_src_cm.resources[0].data | default({})) | dict2items | selectattr('key','match','.*\\.crt$') | list | length }}"
+  when: enable_ca_certificates | default(true)
+
+- name: CA | Assert CA ConfigMap has certificate data (fail-fast)
+  ansible.builtin.assert:
+    that:
+      - (ca_src_cm.resources | default([])) | length > 0
+      - (ca_src_cm.resources[0].data | default({})) | length > 0
+      - ca_src_crt_count | int > 0
+    fail_msg: >-
+      CA ConfigMap {{ ca_configmap_name }} in {{ ca_configmap_namespace }} exists but has no *.crt data.
+      Populate it via the ca-certificates role before deploying SonarQube, or set require_ca_configmap_nonempty=false to bypass.
+    success_msg: "CA ConfigMap contains certificate data."
+  when:
+    - enable_ca_certificates | default(true)
+    - require_ca_configmap_nonempty | default(true)
+
+- name: CA | Create/Update CA ConfigMap in app namespace
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: "{{ ca_configmap_name }}"
+        namespace: "{{ sonarqube_namespace }}"
+      data: "{{ ca_src_cm.resources[0].data | default({}) }}"
+  when:
+    - enable_ca_certificates | default(true)
+    - (ca_src_cm.resources | default([])) | length > 0
+
+# Storage: PVs + PVCs bound to NFS
+- name: Create NFS PersistentVolumes for SonarQube
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'sonarqube-pv.yaml.j2') | from_yaml_all | list }}"
+
+- name: Create PersistentVolumeClaims for SonarQube
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'sonarqube-pvc.yaml.j2') | from_yaml_all | list }}"
+
+# ConfigMap for non-sensitive configuration
+- name: Create SonarQube config ConfigMap
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: sonarqube-config
+        namespace: "{{ sonarqube_namespace }}"
+      data:
+        SONAR_JDBC_URL: "jdbc:postgresql://{{ sonarqube_db_connection }}/{{ sonarqube_database }}"
+        SONAR_JDBC_USERNAME: "{{ sonarqube_db_user }}"
+
+# Secret for sensitive configuration
+- name: Create SonarQube config secret
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: sonarqube-secret
+        namespace: "{{ sonarqube_namespace }}"
+      type: Opaque
+      stringData:
+        SONAR_JDBC_PASSWORD: "{{ sonarqube_db_password }}"
+        LDAP_BIND_PASSWORD: "{{ ldap_bind_password | default('') }}"
+
+# TLS Certificate (cert-manager)
+- name: TLS | Create Certificate for SonarQube (cert-manager)
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'sonarqube-certificate.yaml.j2') | from_yaml }}"
+  when: enable_cert_manager | default(false)
+
+# Service
+- name: Create SonarQube service
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'sonarqube-service.yaml.j2') | from_yaml }}"
+
+# Deployment
+- name: Deploy SonarQube
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'sonarqube-deployment.yaml.j2') | from_yaml }}"
+
+# Ingress
+- name: Create Traefik IngressRoute for SonarQube
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'sonarqube-ingressroute.yaml.j2') | from_yaml }}"
+
+# Cleanup block
+- name: Cleanup | Remove SonarQube resources
+  tags:
+    - never
+    - cleanup
+  when:
+    - cleanup | default(false)
+    - "'sonarqube-service' in ansible_run_tags"
+  block:
+    - name: Cleanup | Proceed marker
+      ansible.builtin.debug:
+        msg: "Running cleanup for sonarqube-service"
+    - name: Cleanup | Remove IngressRoute
+      kubernetes.core.k8s:
+        state: absent
+        definition:
+          apiVersion: traefik.io/v1alpha1
+          kind: IngressRoute
+          metadata:
+            name: sonarqube-ingress
+            namespace: "{{ sonarqube_namespace }}"
+
+    - name: Cleanup | Remove Deployment
+      kubernetes.core.k8s:
+        state: absent
+        definition:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: sonarqube
+            namespace: "{{ sonarqube_namespace }}"
+
+    - name: Cleanup | Remove Service
+      kubernetes.core.k8s:
+        state: absent
+        definition:
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: sonarqube
+            namespace: "{{ sonarqube_namespace }}"
+
+    - name: Cleanup | Remove Secret
+      kubernetes.core.k8s:
+        state: absent
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: sonarqube-secret
+            namespace: "{{ sonarqube_namespace }}"
+
+    - name: Cleanup | Remove ConfigMap
+      kubernetes.core.k8s:
+        state: absent
+        definition:
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: sonarqube-config
+            namespace: "{{ sonarqube_namespace }}"
+
+    - name: Cleanup | Remove PVCs
+      kubernetes.core.k8s:
+        state: absent
+        definition:
+          apiVersion: v1
+          kind: PersistentVolumeClaim
+          metadata:
+            name: "{{ item }}"
+            namespace: "{{ sonarqube_namespace }}"
+      loop:
+        - sonarqube-conf-pvc
+        - sonarqube-data-pvc
+        - sonarqube-logs-pvc
+        - sonarqube-extensions-pvc
+
+    - name: Cleanup | Remove PVs
+      kubernetes.core.k8s:
+        state: absent
+        definition:
+          apiVersion: v1
+          kind: PersistentVolume
+          metadata:
+            name: "{{ item }}"
+      loop:
+        - "sonarqube-conf-pv-{{ env }}"
+        - "sonarqube-data-pv-{{ env }}"
+        - "sonarqube-logs-pv-{{ env }}"
+        - "sonarqube-extensions-pv-{{ env }}"
+
+    - name: Cleanup | Remove Namespace (last)
+      kubernetes.core.k8s:
+        state: absent
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ sonarqube_namespace }}"

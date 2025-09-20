@@ -1,0 +1,84 @@
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: sonarqube-conf-pv-{{ env }}
+  labels:
+    app: sonarqube
+    volume: conf
+    env: "{{ env }}"
+spec:
+  capacity:
+    storage: {{ sonarqube_conf_pvc_size }}
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  nfs:
+    server: {{ sonar_nfs_server_host }}
+    path: {{ sonar_nfs_conf_path }}
+  claimRef:
+    namespace: {{ sonarqube_namespace }}
+    name: sonarqube-conf-pvc
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: sonarqube-data-pv-{{ env }}
+  labels:
+    app: sonarqube
+    volume: data
+    env: "{{ env }}"
+spec:
+  capacity:
+    storage: {{ sonarqube_data_pvc_size }}
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  nfs:
+    server: {{ sonar_nfs_server_host }}
+    path: {{ sonar_nfs_data_path }}
+  claimRef:
+    namespace: {{ sonarqube_namespace }}
+    name: sonarqube-data-pvc
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: sonarqube-logs-pv-{{ env }}
+  labels:
+    app: sonarqube
+    volume: logs
+    env: "{{ env }}"
+spec:
+  capacity:
+    storage: {{ sonarqube_logs_pvc_size }}
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  nfs:
+    server: {{ sonar_nfs_server_host }}
+    path: {{ sonar_nfs_logs_path }}
+  claimRef:
+    namespace: {{ sonarqube_namespace }}
+    name: sonarqube-logs-pvc
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: sonarqube-extensions-pv-{{ env }}
+  labels:
+    app: sonarqube
+    volume: extensions
+    env: "{{ env }}"
+spec:
+  capacity:
+    storage: {{ sonarqube_extensions_pvc_size }}
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  nfs:
+    server: {{ sonar_nfs_server_host }}
+    path: {{ sonar_nfs_extensions_path }}
+  claimRef:
+    namespace: {{ sonarqube_namespace }}
+    name: sonarqube-extensions-pvc

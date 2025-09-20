@@ -1,0 +1,23 @@
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: sonarqube-ingress
+  namespace: {{ sonarqube_namespace }}
+spec:
+  entryPoints:
+    - web
+    - websecure
+  routes:
+    - match: "Host(`{{ sonarqube_hostname }}`)"
+      kind: Rule
+      services:
+        - name: sonarqube
+          port: 9000
+{% if enable_tls | default(true) %}
+  tls:
+{% if enable_cert_manager | default(false) %}
+    secretName: {{ certificate_secret_name }}
+{% else %}
+    certResolver: {{ cert_resolver | default('letsencrypt') }}
+{% endif %}
+{% endif %}

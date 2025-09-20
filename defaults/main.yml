@@ -1,2 +1,82 @@
 ---
 # defaults file for sonarqube-service
+
+# K3s/Kubernetes Configuration
+sonarqube_namespace: sysmango-core-prod
+sonarqube_replicas: 1
+env: prod
+
+# SonarQube Docker Image
+sonarqube_docker_image: registry.sysmango.net/sonarqube
+sonarqube_docker_image_tag: community
+
+# Database Configuration
+sonarqube_db_connection: 'postgresql.sysmango-data-prod:5432'
+create_sonarqube_db: true
+
+# SonarQube Vault Configuration
+sonarqube_vault_secret: sysmango/prod/sonarqube-prod
+sonarqube_password_from_vault: true
+
+# SonarQube Hostname for Ingress
+sonarqube_hostname: sonar.sysmango.net
+
+# TLS Configuration
+enable_tls: true
+cert_resolver: vault-issuer
+# cert-manager integration (preferred when using Vault Issuer)
+enable_cert_manager: true
+certificate_secret_name: sonarqube-tls
+certificate_issuer_name: vault-issuer
+certificate_issuer_kind: ClusterIssuer
+
+# NFS Configuration (SonarQube-specific isolated namespace)
+sonar_nfs_server_host: "{{ nfs_server_host | default('files.sysmango.net') }}"
+sonar_nfs_dir_mode: "{{ nfs_dir_mode | default('0755') }}"
+sonar_nfs_data_dir_mode: "{{ nfs_data_dir_mode | default('0775') }}"
+sonar_nfs_dir_owner: "{{ nfs_dir_owner | default('999') }}"
+sonar_nfs_dir_group: "{{ nfs_dir_group | default('999') }}"
+create_nfs_directories: false
+
+# NFS Paths (SonarQube-specific isolated namespace)
+sonar_nfs_conf_path: "/srv/nfs/prod/sonarqube/conf"
+sonar_nfs_data_path: "/srv/nfs/prod/sonarqube/data"
+sonar_nfs_logs_path: "/srv/nfs/prod/sonarqube/logs"
+sonar_nfs_extensions_path: "/srv/nfs/prod/sonarqube/extensions"
+
+# PVC Sizes
+sonarqube_conf_pvc_size: 1Gi
+sonarqube_data_pvc_size: 50Gi
+sonarqube_logs_pvc_size: 5Gi
+sonarqube_extensions_pvc_size: 10Gi
+
+# Resource Limits
+sonarqube_resources:
+  requests:
+    cpu: 500m
+    memory: 2Gi
+  limits:
+    cpu: 2000m
+    memory: 4Gi
+
+# Vault Configuration
+vault_addr: https://vault.sysmango.net:8200
+vault_namespace: ''
+pg_vault_secret: sysmango/postgresql-prod
+pg_vault_field: postgres_password
+pg_password_from_vault: true
+
+# PostgreSQL Connection
+postgres_host: postgresql.sysmango-core-data  # Internal cluster hostname
+postgres_external_host: postgres.sysmango.net  # External hostname for Ansible tasks
+postgres_user: postgres
+
+# CA Certificate Configuration
+ca_configmap_name: sysmango-ca-certificates
+ca_configmap_namespace: sysmango-core-prod
+enable_ca_certificates: true
+require_ca_configmap_nonempty: true
+
+# LDAP Configuration (from vault)
+enable_ldap: true
+ldap_vault_secret: sysmango/prod/jumpcloud-prod
